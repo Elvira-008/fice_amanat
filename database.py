@@ -7,7 +7,7 @@ from datetime import datetime
 
 import numpy as np
 
-from settings import DB_NAME, TEACHER_PASSWORD
+from settings import ATTENDANCE_UPDATE_INTERVAL_MINUTES, DB_NAME, TEACHER_PASSWORD
 
 attendance_lock = threading.Lock()
 
@@ -437,22 +437,45 @@ def log_attendance(name, class_name, status="keldi"):
         try:
             cur = conn.cursor()
             cur.execute("BEGIN IMMEDIATE")
-            today = datetime.now().strftime("%Y-%m-%d")
+            now = datetime.now()
+            today = now.strftime("%Y-%m-%d")
             cur.execute("""
-                SELECT status
+                SELECT id, status, timestamp
                 FROM attendance
                 WHERE name = ? AND date(timestamp) = ?
-                ORDER BY timestamp DESC, id DESC
-                LIMIT 1
+                ORDER BY timestamp ASC, id ASC
             """, (name, today))
-            row = cur.fetchone()
-            last_status = row[0] if row else None
+            rows = cur.fetchall()
+            arrival = next((row for row in rows if row[1] == "keldi"), None)
+            departures = [row for row in rows if row[1] == "ketti"]
+            latest_departure = departures[-1] if departures else None
 
-            if last_status == status or (last_status is None and status == "ketti"):
+            # The first arrival is immutable for the rest of the day.
+            if status == "keldi" and arrival is not None:
                 conn.rollback()
                 return False
 
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # A departure is valid only after arrival. Repeated departure scans
+            # update its time at most once per configured interval.
+            if status == "ketti" and arrival is None:
+                conn.rollback()
+                return False
+
+            timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+            if status == "ketti" and latest_departure is not None:
+                last_update = datetime.strptime(latest_departure[2], "%Y-%m-%d %H:%M:%S")
+                elapsed_minutes = (now - last_update).total_seconds() / 60
+                if elapsed_minutes < ATTENDANCE_UPDATE_INTERVAL_MINUTES:
+                    conn.rollback()
+                    return False
+                cur.execute("""
+                    UPDATE attendance
+                    SET class_name = ?, timestamp = ?
+                    WHERE id = ?
+                """, (class_name, timestamp, latest_departure[0]))
+                conn.commit()
+                return True
+
             cur.execute("""
                 INSERT INTO attendance (name, class_name, status, timestamp)
                 VALUES (?, ?, ?, ?)
@@ -578,6 +601,48 @@ def get_parent_report(parent_code, parent_name=""):
         if row[2] is None or is_status_change(row, last_status, 0, 2, 3)
     ]
     return sorted(data, key=lambda row: (row[0], row[3] or ""), reverse=True)
+
+
+def get_parent_daily_report(parent_code, parent_name=""):
+    conn = get_connection()
+    cur = conn.cursor()
+    parent_code = (parent_code or "").strip()
+    parent_name = (parent_name or "").strip()
+    if not parent_code or not parent_name:
+        conn.close()
+        return []
+
+    cur.execute("""
+        WITH parent_students AS (
+            SELECT name, class_name
+            FROM students
+            WHERE parent_code = ?
+              AND lower(trim(parent_name)) = lower(trim(?))
+        ), report_days AS (
+            SELECT name, class_name, date('now', 'localtime') AS report_date
+            FROM parent_students
+
+            UNION
+
+            SELECT s.name, s.class_name, date(a.timestamp) AS report_date
+            FROM parent_students s
+            JOIN attendance a ON a.name = s.name
+        )
+        SELECT d.name,
+               d.class_name,
+               d.report_date,
+               MIN(CASE WHEN a.status = 'keldi' THEN time(a.timestamp) END) AS arrived_at,
+               MAX(CASE WHEN a.status = 'ketti' THEN time(a.timestamp) END) AS left_at
+        FROM report_days d
+        LEFT JOIN attendance a
+               ON a.name = d.name
+              AND date(a.timestamp) = d.report_date
+        GROUP BY d.name, d.class_name, d.report_date
+        ORDER BY d.report_date DESC, d.name
+    """, (parent_code, parent_name))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
 
 
 def get_classes_summary():

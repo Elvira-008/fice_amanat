@@ -58,6 +58,7 @@ a { color: var(--blue); text-decoration: none; }
 .students-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
 .students-heading h1 { margin: 0; }
 .add-student-corner { margin-left: auto; }
+.student-admin-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .student-dialog { width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 40px); box-sizing: border-box; border: 0; border-radius: 16px; padding: 22px; box-shadow: 0 24px 70px rgba(15, 23, 42, .28); }
 .student-dialog::backdrop { background: rgba(15, 23, 42, .56); }
 .student-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
@@ -66,6 +67,19 @@ a { color: var(--blue); text-decoration: none; }
 input, select { width: 100%; box-sizing: border-box; padding: 10px; margin: 7px 0 12px; border: 1px solid #cbd5e1; border-radius: 7px; font-size: 15px; }
 label { font-weight: 700; font-size: 14px; }
 table { width: 100%; border-collapse: collapse; background: white; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.journal-scroll { width: 100%; overflow-x: auto; }
+.attendance-journal { min-width: 720px; }
+.attendance-journal .journal-name { position: sticky; left: 0; z-index: 2; min-width: 180px; background: #eef2ff; }
+.attendance-journal tbody .journal-name { background: white; }
+.journal-date { min-width: 150px; text-align: center; font-size: 16px; }
+.journal-cell { min-width: 150px; padding: 8px; }
+.journal-row-date { min-width: 130px; font-weight: 700; }
+.journal-in, .journal-out { display: flex; justify-content: space-between; gap: 10px; padding: 8px 10px; border-radius: 8px; }
+.journal-in { color: #166534; background: #dcfce7; }
+.journal-in.pending { color: #64748b; background: #f1f5f9; }
+.journal-out { color: #991b1b; background: #fee2e2; margin-top: 6px; }
+.journal-out.pending { color: #64748b; background: #f1f5f9; }
+.journal-empty { display: block; color: #991b1b; background: #fee2e2; border-radius: 8px; padding: 8px 10px; text-align: center; }
 th, td { border-bottom: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: middle; }
 th { background: #eef2ff; }
 tr:last-child td { border-bottom: 0; }

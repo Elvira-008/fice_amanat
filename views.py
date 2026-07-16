@@ -49,7 +49,7 @@ def students_rows(class_names=None, can_manage=False):
             <td><img class="photo" src="/{esc(photo_path)}" alt=""></td>
             <td>{esc(name)}</td>
             <td>{esc(class_name)}</td>
-            <td>{esc(parent_name)}<br><span class="muted">Пароль: {esc(parent_code)}</span></td>
+            <td>{esc(parent_name)}<br><span class="muted">Пароль для родителя: {esc(parent_code)}</span></td>
             {actions}
         </tr>
         """)
@@ -326,6 +326,44 @@ def class_report_view(class_name, report_rows, show_class_list=True):
     """
 
 
+def admin_attendance_journal_view(class_name, report_rows):
+    dates = sorted({str(row[2]) for row in report_rows}, reverse=True)
+    students = {}
+    for name, _, report_date, arrived_at, left_at, _, _ in report_rows:
+        students.setdefault(name, {})[str(report_date)] = (arrived_at, left_at)
+
+    date_headers = "".join(
+        f'<th class="journal-date">{esc(datetime.strptime(value, "%Y-%m-%d").strftime("%d.%m.%Y"))}</th>'
+        for value in dates
+    )
+    rows = []
+    for name in sorted(students):
+        cells = []
+        for report_date in dates:
+            arrived_at, left_at = students[name].get(report_date, (None, None))
+            cells.append(f"""
+                <td class="journal-cell">
+                    <div class="journal-in"><b>Пришел</b><span>{esc(arrived_at or '—')}</span></div>
+                    <div class="journal-out"><b>Ушел</b><span>{esc(left_at or '—')}</span></div>
+                </td>
+            """)
+        rows.append(f'<tr><td class="journal-name"><b>{esc(name)}</b></td>{"".join(cells)}</tr>')
+
+    if not rows:
+        rows.append('<tr><td class="muted">В этом классе пока нет учеников</td></tr>')
+    return f"""
+        <div class="top"><a class="btn light" href="/list">Назад к классам</a></div>
+        <h1>Общий отчет · {esc(class_name)}</h1>
+        <p class="muted">Время прихода сохраняется один раз за день. Уход отображается ниже прихода.</p>
+        <div class="journal-scroll">
+            <table class="attendance-journal">
+                <thead><tr><th class="journal-name">Ученик</th>{date_headers}</tr></thead>
+                <tbody>{''.join(rows)}</tbody>
+            </table>
+        </div>
+    """
+
+
 def teacher_report_view(class_name, report_rows):
     rows = []
     for name, _, report_date, arrived_at, left_at, parent_name, parent_code in report_rows:
@@ -372,12 +410,12 @@ def students_view(class_names=None, is_admin=False):
                 <button class="dialog-close" type="button" aria-label="Закрыть" onclick="document.getElementById('addStudentDialog').close()">×</button>
             </div>
             <form action="/add" method="post" enctype="multipart/form-data">
-                <label>Имя ученика</label>
+                <label>Имя и фамилия</label>
                 <input name="name" required placeholder="Например: Иван Иванов">
                 """ + class_field + """
-                <label>Родитель</label>
-                <input name="parent_name" required placeholder="Имя родителя">
-                <label>Пароль родителя для входа</label>
+                <label>Логин родителя</label>
+                <input name="parent_name" required placeholder="Логин родителя">
+                <label>Пароль для родителя</label>
                 <input name="parent_code" required placeholder="Например: parent_ivanov">
                 <label>Фото ученика</label>
                 <input type="file" name="photo" accept="image/*" required>
@@ -386,9 +424,11 @@ def students_view(class_names=None, is_admin=False):
         </dialog>
     """ if is_admin else ""
     add_button = """
-        <button class="btn green add-student-corner" type="button" onclick="document.getElementById('addStudentDialog').showModal()">
-            Добавить ученика
-        </button>
+        <div class="student-admin-actions">
+            <button class="btn green add-student-corner" type="button" onclick="document.getElementById('addStudentDialog').showModal()">
+                Добавить ученика
+            </button>
+        </div>
     """ if is_admin else ""
     return """
         <div class="top">
@@ -399,7 +439,7 @@ def students_view(class_names=None, is_admin=False):
             """ + add_button + """
         </div>
         <table>
-            <thead><tr><th>Фото</th><th>Имя</th><th>Класс</th><th>Родитель и пароль</th>""" + action_header + """</tr></thead>
+            <thead><tr><th>Фото</th><th>Имя и фамилия</th><th>Класс</th><th>Логин и пароль родителя</th>""" + action_header + """</tr></thead>
             <tbody>""" + students_rows(class_names, is_admin) + """</tbody>
         </table>
         """ + add_form + """
@@ -416,13 +456,13 @@ def edit_student_view(student):
         <h1>Изменить ученика</h1>
         <div class="panel">
             <form action="/edit/{url_value(name)}" method="post" enctype="multipart/form-data">
-                <label>Имя ученика</label>
+                <label>Имя и фамилия</label>
                 <input name="name" value="{esc(name)}" required>
                 <label>Класс</label>
                 <input name="class_name" value="{esc(class_name)}" required>
-                <label>Родитель</label>
+                <label>Логин родителя</label>
                 <input name="parent_name" value="{esc(parent_name)}" required>
-                <label>Код родителя для входа</label>
+                <label>Пароль для родителя</label>
                 <input name="parent_code" value="{esc(parent_code)}" required>
                 <label>Новое фото ученика</label>
                 <input type="file" name="photo" accept="image/*">
@@ -452,16 +492,42 @@ def parent_login_view(name="", code=""):
     """
 
 
-def parent_report_view(rows):
+def parent_report_view(report_rows):
+    dates = sorted({str(row[2]) for row in report_rows}, reverse=True)
+    students = {}
+    for student_name, _, report_date, arrived_at, left_at in report_rows:
+        students.setdefault(student_name, {})[str(report_date)] = (arrived_at, left_at)
+
+    date_headers = "".join(
+        f'<th class="journal-date">{esc(datetime.strptime(value, "%Y-%m-%d").strftime("%d.%m.%Y"))}</th>'
+        for value in dates
+    )
+    rows = []
+    for student_name in sorted(students):
+        cells = []
+        for report_date in dates:
+            arrived_at, left_at = students[student_name].get(report_date, (None, None))
+            cells.append(f"""
+                <td class="journal-cell">
+                    <div class="journal-in"><b>Пришел</b><span>{esc(arrived_at or '—')}</span></div>
+                    <div class="journal-out"><b>Ушел</b><span>{esc(left_at or '—')}</span></div>
+                </td>
+            """)
+        rows.append(f'<tr><td class="journal-name"><b>{esc(student_name)}</b></td>{"".join(cells)}</tr>')
+    if not rows:
+        rows.append('<tr><td class="muted">По этому паролю ученики не найдены</td></tr>')
+
     return f"""
         <div class="top">
             <a class="btn light" href="/">Назад</a>
         </div>
         <h1>Отчет ребенка</h1>
-        <table>
-            <thead><tr><th>Ученик</th><th>Класс</th><th>Статус</th><th>Время</th></tr></thead>
-            <tbody>{''.join(rows)}</tbody>
-        </table>
+        <div class="journal-scroll">
+            <table class="attendance-journal">
+                <thead><tr><th class="journal-name">Ученик</th>{date_headers}</tr></thead>
+                <tbody>{''.join(rows)}</tbody>
+            </table>
+        </div>
     """
 
 
@@ -556,9 +622,9 @@ def admin_teachers_view():
     if not rows:
         rows.append("<tr><td colspan='3' class='muted'>Учителей пока нет</td></tr>")
     return """
-        <div class="top"><a class="btn light" href="/">Назад</a></div>
-        <h1>Аккаунты учителей</h1>
-        <div class="panel"><h2>Добавить или обновить учителя</h2>
+        <div class="top"><a class="btn light" href="/students">Назад к ученикам</a></div>
+        <h1>Закрепление классов</h1>
+        <div class="panel"><h2>Закрепить классы за учителем</h2>
             <form method="post" action="/admin/teachers">
                 <label>Логин</label><input name="login" required>
                 <label>Пароль</label><input type="password" name="password" placeholder="Для существующего аккаунта можно оставить пустым">

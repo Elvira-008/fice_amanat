@@ -26,6 +26,7 @@ from database import (
     get_class_daily_report,
     get_class_report,
     get_parent_report,
+    get_parent_daily_report,
     get_recent_attendance,
     get_student_by_name,
     init_db,
@@ -49,6 +50,7 @@ from settings import (
 )
 from views import (
     admin_class_report_view,
+    admin_attendance_journal_view,
     admin_classes_view,
     admin_login_view,
     admin_parents_view,
@@ -264,25 +266,6 @@ async def unified_login(login: str = Form(...), password: str = Form(...)):
         )
         return response
 
-    assigned_classes = authenticate_teacher(clean_login, clean_password)
-    if assigned_classes is not None:
-        session_token = secrets.token_hex(32)
-        TEACHER_SESSIONS[session_token] = {
-            "login": clean_login,
-            "classes": tuple(assigned_classes),
-            "active_class": "",
-        }
-        response = RedirectResponse(url="/teacher-classes", status_code=303)
-        response.set_cookie(
-            TEACHER_COOKIE_NAME,
-            session_token,
-            httponly=True,
-            secure=PRODUCTION,
-            samesite="strict",
-            max_age=12 * 60 * 60,
-        )
-        return response
-
     if get_parent_report(clean_password, clean_login):
         return RedirectResponse(
             url=f"/parent?name={quote(clean_login)}&code={quote(clean_password)}",
@@ -294,32 +277,12 @@ async def unified_login(login: str = Form(...), password: str = Form(...)):
 
 @app.get("/teacher-login", response_class=HTMLResponse)
 async def teacher_login_page(request: Request):
-    if is_teacher(request):
-        return RedirectResponse(url="/", status_code=303)
-    return page("Мугалим кирүүсү", teacher_login_view())
+    return RedirectResponse(url="/", status_code=303)
 
 
 @app.post("/teacher-login")
 async def teacher_login(login: str = Form(...), password: str = Form(...)):
-    assigned_classes = authenticate_teacher(login, password)
-    if assigned_classes is None:
-        return HTMLResponse(page("Мугалим кирүүсү", teacher_login_view(error=True)), status_code=401)
-    session_token = secrets.token_hex(32)
-    TEACHER_SESSIONS[session_token] = {
-        "login": login.strip(),
-        "classes": tuple(assigned_classes),
-        "active_class": "",
-    }
-    response = RedirectResponse(url="/teacher-classes", status_code=303)
-    response.set_cookie(
-        TEACHER_COOKIE_NAME,
-        session_token,
-        httponly=True,
-        secure=PRODUCTION,
-        samesite="strict",
-        max_age=12 * 60 * 60,
-    )
-    return response
+    return RedirectResponse(url="/", status_code=303)
 
 
 @app.get("/teacher-logout")
@@ -418,7 +381,7 @@ async def admin_teachers_page(request: Request):
     redirect = require_admin_page(request)
     if redirect:
         return redirect
-    return page("Учителя · Админ", admin_teachers_view())
+    return RedirectResponse(url="/students", status_code=303)
 
 
 @app.post("/admin/teachers")
@@ -483,7 +446,10 @@ async def class_report_page(request: Request, class_name: str):
         return RedirectResponse(url="/list", status_code=303)
     if is_teacher(request) and not is_admin(request):
         return page(f"Общий отчет · {class_name}", teacher_report_view(class_name, get_class_daily_report(class_name)))
-    return page(f"Отчет класса {class_name}", class_report_view(class_name, get_class_report(class_name)))
+    return page(
+        f"Общий отчет · {class_name}",
+        admin_attendance_journal_view(class_name, get_class_daily_report(class_name)),
+    )
 
 
 @app.post("/clear-attendance")
@@ -885,21 +851,7 @@ async def parent_page(name: str = Query(""), code: str = Query("")):
     if not name.strip() or not code.strip():
         return page("Кабинет родителя", parent_login_view(name, code))
 
-    rows = []
-    for student_name, class_name, status, timestamp in get_parent_report(code, name):
-        status_text = "Отчета нет" if not status else ("Пришел" if status == "keldi" else "Ушел")
-        rows.append(f"""
-        <tr>
-            <td>{esc(student_name)}</td>
-            <td>{esc(class_name)}</td>
-            <td>{esc(status_text)}</td>
-            <td>{esc(timestamp or '')}</td>
-        </tr>
-        """)
-    if not rows:
-        rows.append("<tr><td colspan='4' class='muted'>По этому коду ученики не найдены</td></tr>")
-
-    return page("Кабинет родителя", parent_report_view(rows))
+    return page("Кабинет родителя", parent_report_view(get_parent_daily_report(code, name)))
 
 
 @app.post("/api/login")
