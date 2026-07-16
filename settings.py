@@ -31,6 +31,7 @@ APP_PORT = env_int("APP_PORT", 8080)
 APP_AUTO_PORT = env_bool("APP_AUTO_PORT", True)
 PRODUCTION = env_bool("PRODUCTION", False)
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin2026")
 
 # Мугалим панелине кирүү паролу. Бул жерден өзгөртсө болот:
 TEACHER_PASSWORD = os.getenv("TEACHER_PASSWORD", "mektep2026")

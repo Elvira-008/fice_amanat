@@ -482,7 +482,8 @@ def draw_face_box(frame, box, color, label=""):
     )
 
 
-def recognize_frame(frame, status, liveness_state):
+def recognize_frame(frame, status, liveness_state, allowed_classes=None):
+    allowed_classes = set(allowed_classes or [])
     known = load_known_faces()
     small_frame, scale_x, scale_y = resize_for_recognition(frame)
     faces = []
@@ -507,6 +508,8 @@ def recognize_frame(frame, status, liveness_state):
 
         name, parent_code, class_name = recognize_face(face.embedding, known)
         is_known = (name != UNKNOWN_NAME)
+        if is_known and allowed_classes and class_name not in allowed_classes:
+            continue
         is_live = liveness_state.is_live(small_frame, face, face_box)
 
         x1, y1, x2, y2 = face_box
@@ -534,7 +537,7 @@ def recognize_frame(frame, status, liveness_state):
     return people
 
 
-def camera_frames(status, camera_index):
+def camera_frames(status, camera_index, allowed_classes=None):
     last_recognition = 0.0
     liveness_state = LivenessState()
     recognition_task = None
@@ -545,7 +548,7 @@ def camera_frames(status, camera_index):
         ok, frame = stream.read()
         if not ok:
             error_frame = np.zeros((360, 640, 3), dtype=np.uint8)
-            cv2.putText(error_frame, f"Камера {camera_index} недоступна", (34, 165), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
+            cv2.putText(error_frame, f"Camera {camera_index} unavailable", (34, 165), cv2.FONT_HERSHEY_SIMPLEX, 0.9,
                         (255, 255, 255), 2, cv2.LINE_AA)
             ok, buffer = cv2.imencode(".jpg", error_frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
             if ok:
@@ -563,7 +566,7 @@ def camera_frames(status, camera_index):
 
         if recognition_task is None and now - last_recognition >= RECOGNITION_INTERVAL_SECONDS:
             last_recognition = now
-            recognition_task = recognition_executor.submit(recognize_frame, frame.copy(), status, liveness_state)
+            recognition_task = recognition_executor.submit(recognize_frame, frame.copy(), status, liveness_state, allowed_classes)
 
         # Кадрдагы ар бир адамды айланып чыгып, өз-өзүнчө рамка тартат
         for name, box, is_fake in current_people:
@@ -571,8 +574,8 @@ def camera_frames(status, camera_index):
                 draw_face_box(frame, box, UNKNOWN_FACE_COLOR, "Fake Face")
             else:
                 is_known = name != UNKNOWN_NAME
-                draw_face_box(frame, box, KNOWN_FACE_COLOR if is_known else UNKNOWN_FACE_COLOR,
-                              name if is_known else "")
+                # OpenCV's built-in font cannot render Cyrillic names and shows question marks.
+                draw_face_box(frame, box, KNOWN_FACE_COLOR if is_known else UNKNOWN_FACE_COLOR)
 
         ok, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
         if ok:

@@ -4,6 +4,7 @@ import secrets
 from pathlib import Path
 import socket
 from typing import Optional
+from urllib.parse import quote
 import cv2
 import numpy as np
 import uvicorn
@@ -15,18 +16,25 @@ from fastapi.staticfiles import StaticFiles
 from camera_service import LivenessState, camera_frames, get_face_app, load_known_faces, recognize_frame, \
     warm_up_face_models
 from database import (
+    authenticate_teacher,
     clear_attendance,
+    delete_teacher,
     delete_student_by_name,
     get_all_students_list,
+    get_classes_summary,
     get_class_attendance,
+    get_class_daily_report,
+    get_class_report,
     get_parent_report,
     get_recent_attendance,
     get_student_by_name,
     init_db,
     save_student,
+    save_teacher,
     update_student,
 )
 from settings import (
+    ADMIN_PASSWORD,
     ADMIN_TOKEN,
     ALLOWED_ORIGINS,
     APP_AUTO_PORT,
@@ -40,6 +48,12 @@ from settings import (
     TEACHER_PASSWORD,
 )
 from views import (
+    admin_class_report_view,
+    admin_classes_view,
+    admin_login_view,
+    admin_parents_view,
+    admin_teachers_view,
+    class_report_view,
     edit_student_view,
     esc,
     home_view,
@@ -50,6 +64,9 @@ from views import (
     role_picker_view,
     students_view,
     teacher_login_view,
+    teacher_report_view,
+    unified_login_view,
+    teacher_classes_view,
 )
 
 init_db()
@@ -59,8 +76,10 @@ os.makedirs("static", exist_ok=True)
 
 # Random per-process session token. Issued to the browser as a cookie only
 # after a correct TEACHER_PASSWORD is submitted at /teacher-login.
-TEACHER_SESSION_TOKEN = secrets.token_hex(32)
 TEACHER_COOKIE_NAME = "teacher_session"
+TEACHER_SESSIONS = {}
+ADMIN_SESSION_TOKEN = secrets.token_hex(32)
+ADMIN_COOKIE_NAME = "admin_session"
 
 app = FastAPI(title="School Face ID")
 app.add_middleware(
@@ -127,6 +146,8 @@ def safe_filename(name):
 
 
 def require_admin(request: Request):
+    if is_admin(request):
+        return
     if not ADMIN_TOKEN:
         return
     supplied = (
@@ -141,20 +162,56 @@ def require_admin(request: Request):
 
 def is_teacher(request: Request):
     supplied = request.cookies.get(TEACHER_COOKIE_NAME) or ""
-    return secrets.compare_digest(supplied, TEACHER_SESSION_TOKEN)
+    return supplied in TEACHER_SESSIONS
+
+
+def teacher_classes(request: Request):
+    token = request.cookies.get(TEACHER_COOKIE_NAME) or ""
+    session = TEACHER_SESSIONS.get(token) or {}
+    active_class = session.get("active_class", "")
+    return [active_class] if active_class else []
+
+
+def teacher_assigned_classes(request: Request):
+    token = request.cookies.get(TEACHER_COOKIE_NAME) or ""
+    return list((TEACHER_SESSIONS.get(token) or {}).get("classes", ()))
+
+
+def teacher_login_name(request: Request):
+    token = request.cookies.get(TEACHER_COOKIE_NAME) or ""
+    return (TEACHER_SESSIONS.get(token) or {}).get("login", "")
+
+
+def is_admin(request: Request):
+    supplied = request.cookies.get(ADMIN_COOKIE_NAME) or ""
+    return secrets.compare_digest(supplied, ADMIN_SESSION_TOKEN)
+
+
+def is_staff(request: Request):
+    return is_teacher(request) or is_admin(request)
+
+
+def require_admin_page(request: Request):
+    if not is_admin(request):
+        return RedirectResponse(url="/admin-login", status_code=303)
+    return None
 
 
 def require_teacher_page(request: Request):
     """For HTML pages: bounce unauthenticated visitors to the login screen."""
-    if not is_teacher(request):
+    if not is_staff(request):
         return RedirectResponse(url="/teacher-login", status_code=303)
+    if is_teacher(request) and not teacher_classes(request):
+        return RedirectResponse(url="/teacher-classes", status_code=303)
     return None
 
 
 def require_teacher_action(request: Request):
     """For POST actions (add/edit/delete/clear): reject without a session."""
-    if not is_teacher(request):
+    if not is_staff(request):
         raise HTTPException(status_code=403, detail="Teacher login required")
+    if is_teacher(request) and not teacher_classes(request):
+        raise HTTPException(status_code=403, detail="Select a class first")
 
 
 async def uploaded_image(upload: UploadFile):
@@ -181,9 +238,58 @@ def save_student_photo(image, safe_name):
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
+    if is_admin(request):
+        return page("School Face ID · Админ", home_view("admin"))
     if is_teacher(request):
-        return page("School Face ID", home_view())
-    return page("School Face ID", role_picker_view())
+        if not teacher_classes(request):
+            return RedirectResponse(url="/teacher-classes", status_code=303)
+        return RedirectResponse(url="/list", status_code=303)
+    return page("Вход · School Face ID", unified_login_view())
+
+
+@app.post("/login")
+async def unified_login(login: str = Form(...), password: str = Form(...)):
+    clean_login = login.strip()
+    clean_password = password.strip()
+
+    if clean_login.lower() == "admin" and secrets.compare_digest(clean_password, ADMIN_PASSWORD):
+        response = RedirectResponse(url="/", status_code=303)
+        response.set_cookie(
+            ADMIN_COOKIE_NAME,
+            ADMIN_SESSION_TOKEN,
+            httponly=True,
+            secure=PRODUCTION,
+            samesite="strict",
+            max_age=12 * 60 * 60,
+        )
+        return response
+
+    assigned_classes = authenticate_teacher(clean_login, clean_password)
+    if assigned_classes is not None:
+        session_token = secrets.token_hex(32)
+        TEACHER_SESSIONS[session_token] = {
+            "login": clean_login,
+            "classes": tuple(assigned_classes),
+            "active_class": "",
+        }
+        response = RedirectResponse(url="/teacher-classes", status_code=303)
+        response.set_cookie(
+            TEACHER_COOKIE_NAME,
+            session_token,
+            httponly=True,
+            secure=PRODUCTION,
+            samesite="strict",
+            max_age=12 * 60 * 60,
+        )
+        return response
+
+    if get_parent_report(clean_password, clean_login):
+        return RedirectResponse(
+            url=f"/parent?name={quote(clean_login)}&code={quote(clean_password)}",
+            status_code=303,
+        )
+
+    return HTMLResponse(page("Вход · School Face ID", unified_login_view(error=True)), status_code=401)
 
 
 @app.get("/teacher-login", response_class=HTMLResponse)
@@ -194,13 +300,20 @@ async def teacher_login_page(request: Request):
 
 
 @app.post("/teacher-login")
-async def teacher_login(password: str = Form(...)):
-    if not secrets.compare_digest(password.strip(), TEACHER_PASSWORD):
+async def teacher_login(login: str = Form(...), password: str = Form(...)):
+    assigned_classes = authenticate_teacher(login, password)
+    if assigned_classes is None:
         return HTMLResponse(page("Мугалим кирүүсү", teacher_login_view(error=True)), status_code=401)
-    response = RedirectResponse(url="/", status_code=303)
+    session_token = secrets.token_hex(32)
+    TEACHER_SESSIONS[session_token] = {
+        "login": login.strip(),
+        "classes": tuple(assigned_classes),
+        "active_class": "",
+    }
+    response = RedirectResponse(url="/teacher-classes", status_code=303)
     response.set_cookie(
         TEACHER_COOKIE_NAME,
-        TEACHER_SESSION_TOKEN,
+        session_token,
         httponly=True,
         secure=PRODUCTION,
         samesite="strict",
@@ -210,9 +323,64 @@ async def teacher_login(password: str = Form(...)):
 
 
 @app.get("/teacher-logout")
-async def teacher_logout():
+async def teacher_logout(request: Request):
+    session_token = request.cookies.get(TEACHER_COOKIE_NAME) or ""
+    TEACHER_SESSIONS.pop(session_token, None)
     response = RedirectResponse(url="/", status_code=303)
     response.delete_cookie(TEACHER_COOKIE_NAME)
+    return response
+
+
+@app.get("/admin-login", response_class=HTMLResponse)
+async def admin_login_page(request: Request):
+    if is_admin(request):
+        return RedirectResponse(url="/", status_code=303)
+    return page("Вход администратора", admin_login_view())
+
+
+@app.post("/admin-login")
+async def admin_login(password: str = Form(...)):
+    if not secrets.compare_digest(password.strip(), ADMIN_PASSWORD):
+        return HTMLResponse(page("Вход администратора", admin_login_view(error=True)), status_code=401)
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(
+        ADMIN_COOKIE_NAME,
+        ADMIN_SESSION_TOKEN,
+        httponly=True,
+        secure=PRODUCTION,
+        samesite="strict",
+        max_age=12 * 60 * 60,
+    )
+    return response
+
+
+@app.get("/teacher-classes", response_class=HTMLResponse)
+async def teacher_classes_page(request: Request):
+    if not is_teacher(request):
+        return RedirectResponse(url="/teacher-login", status_code=303)
+    token = request.cookies.get(TEACHER_COOKIE_NAME) or ""
+    session = TEACHER_SESSIONS.get(token)
+    if session is not None:
+        session["active_class"] = ""
+    return page("Выбор класса", teacher_classes_view(teacher_login_name(request), teacher_assigned_classes(request)))
+
+
+@app.get("/teacher-select-class")
+async def teacher_select_class(request: Request, class_name: str = Query(...)):
+    if not is_teacher(request):
+        return RedirectResponse(url="/teacher-login", status_code=303)
+    if class_name not in teacher_assigned_classes(request):
+        raise HTTPException(status_code=403, detail="Class is not assigned to this teacher")
+    token = request.cookies.get(TEACHER_COOKIE_NAME) or ""
+    TEACHER_SESSIONS[token]["active_class"] = class_name
+    return RedirectResponse(url="/list", status_code=303)
+
+
+@app.get("/admin-logout")
+async def admin_logout():
+    response = RedirectResponse(url="/", status_code=303)
+    response.delete_cookie(ADMIN_COOKIE_NAME)
+    response.delete_cookie("admin_token")
     return response
 
 
@@ -221,19 +389,108 @@ async def favicon():
     return Response(status_code=204)
 
 
+@app.get("/admin/classes", response_class=HTMLResponse)
+async def admin_classes_page(request: Request):
+    redirect = require_admin_page(request)
+    if redirect:
+        return redirect
+    return RedirectResponse(url="/list", status_code=303)
+
+
+@app.get("/admin/classes/{class_name}", response_class=HTMLResponse)
+async def admin_class_report_page(request: Request, class_name: str):
+    redirect = require_admin_page(request)
+    if redirect:
+        return redirect
+    return RedirectResponse(url=f"/list/{quote(class_name, safe='')}", status_code=303)
+
+
+@app.get("/admin/parents", response_class=HTMLResponse)
+async def admin_parents_page(request: Request):
+    redirect = require_admin_page(request)
+    if redirect:
+        return redirect
+    return page("Родители · Админ", admin_parents_view())
+
+
+@app.get("/admin/teachers", response_class=HTMLResponse)
+async def admin_teachers_page(request: Request):
+    redirect = require_admin_page(request)
+    if redirect:
+        return redirect
+    return page("Учителя · Админ", admin_teachers_view())
+
+
+@app.post("/admin/teachers")
+async def admin_save_teacher(
+        request: Request,
+        login: str = Form(...),
+        password: str = Form(""),
+        class_names: list[str] = Form(...),
+):
+    if not is_admin(request):
+        raise HTTPException(status_code=403, detail="Admin access denied")
+    classes = list(dict.fromkeys(value.strip() for value in class_names if value.strip()))
+    if not classes:
+        raise HTTPException(status_code=400, detail="At least one class is required")
+    if not save_teacher(login, password, classes):
+        raise HTTPException(status_code=400, detail="Login and password are required for a new teacher")
+    return RedirectResponse(url="/admin/teachers", status_code=303)
+
+
+@app.post("/admin/teachers/{login}/delete")
+async def admin_delete_teacher(request: Request, login: str):
+    if not is_admin(request):
+        raise HTTPException(status_code=403, detail="Admin access denied")
+    delete_teacher(login)
+    for token, session in list(TEACHER_SESSIONS.items()):
+        if session.get("login") == login:
+            TEACHER_SESSIONS.pop(token, None)
+    return RedirectResponse(url="/admin/teachers", status_code=303)
+
+
+@app.get("/parents", response_class=HTMLResponse)
+async def teacher_parents_page(request: Request):
+    redirect = require_teacher_page(request)
+    if redirect:
+        return redirect
+    if is_teacher(request) and not is_admin(request):
+        return RedirectResponse(url="/list", status_code=303)
+    classes = [] if is_admin(request) else teacher_classes(request)
+    return page("Родители", admin_parents_view(classes, is_admin(request)))
+
+
 @app.get("/list", response_class=HTMLResponse)
 async def list_page(request: Request):
     redirect = require_teacher_page(request)
     if redirect:
         return redirect
+    if is_teacher(request) and not is_admin(request):
+        classes = teacher_classes(request)
+        if len(classes) == 1:
+            class_name = classes[0]
+            return page(f"Общий отчет · {class_name}", teacher_report_view(class_name, get_class_daily_report(class_name)))
+        return page("Мои классы", list_view(classes))
     return page("List / Общий отчет", list_view())
+
+
+@app.get("/list/{class_name}", response_class=HTMLResponse)
+async def class_report_page(request: Request, class_name: str):
+    redirect = require_teacher_page(request)
+    if redirect:
+        return redirect
+    if is_teacher(request) and not is_admin(request) and class_name not in teacher_classes(request):
+        return RedirectResponse(url="/list", status_code=303)
+    if is_teacher(request) and not is_admin(request):
+        return page(f"Общий отчет · {class_name}", teacher_report_view(class_name, get_class_daily_report(class_name)))
+    return page(f"Отчет класса {class_name}", class_report_view(class_name, get_class_report(class_name)))
 
 
 @app.post("/clear-attendance")
 async def clear_attendance_log(request: Request):
     require_teacher_action(request)
     require_admin(request)
-    clear_attendance()
+    clear_attendance(None if is_admin(request) else teacher_classes(request))
     return RedirectResponse(url="/list", status_code=303)
 
 
@@ -242,15 +499,20 @@ async def students_page(request: Request):
     redirect = require_teacher_page(request)
     if redirect:
         return redirect
-    return page("Ученики", students_view())
+    if is_teacher(request) and not is_admin(request):
+        return RedirectResponse(url="/list", status_code=303)
+    own_classes = [] if is_admin(request) else teacher_classes(request)
+    return page("Ученики", students_view(own_classes, is_admin(request)))
 
 
 @app.get("/edit/{name}", response_class=HTMLResponse)
 async def edit_student_page(request: Request, name: str):
-    redirect = require_teacher_page(request)
+    redirect = require_admin_page(request)
     if redirect:
         return redirect
     student = get_student_by_name(name)
+    if student is not None and is_teacher(request) and not is_admin(request) and student[1] not in teacher_classes(request):
+        student = None
     if student is None:
         return HTMLResponse(page("Ошибка", """
             <h1>Ученик не найден</h1>
@@ -270,7 +532,8 @@ async def edit_student(
         photo: Optional[UploadFile] = File(None),
 ):
     require_teacher_action(request)
-    require_admin(request)
+    if not is_admin(request):
+        raise HTTPException(status_code=403, detail="Only administrators can edit students")
     student_name = name.strip()
     safe_name = safe_filename(student_name)
     class_name = class_name.strip()
@@ -280,11 +543,18 @@ async def edit_student(
     embedding = None
 
     old_student = get_student_by_name(old_name)
+    if old_student is not None and is_teacher(request) and not is_admin(request) and old_student[1] not in teacher_classes(request):
+        old_student = None
     if old_student is None:
         return HTMLResponse(page("Ошибка", """
             <h1>Ученик не найден</h1>
             <a class="btn light" href="/students">Назад</a>
         """), status_code=404)
+
+    if is_teacher(request) and not is_admin(request):
+        allowed_classes = teacher_classes(request)
+        if class_name not in allowed_classes:
+            class_name = old_student[1]
 
     if photo is not None and photo.filename:
         img = await uploaded_image(photo)
@@ -323,12 +593,17 @@ async def add_student(
         photo: UploadFile = File(...),
 ):
     require_teacher_action(request)
-    require_admin(request)
+    if not is_admin(request):
+        raise HTTPException(status_code=403, detail="Only administrators can add students")
     student_name = name.strip()
     safe_name = safe_filename(student_name)
     class_name = class_name.strip()
     parent_name = parent_name.strip()
     parent_code = parent_code.strip()
+    if is_teacher(request) and not is_admin(request):
+        allowed_classes = teacher_classes(request)
+        if class_name not in allowed_classes:
+            raise HTTPException(status_code=403, detail="Access to another class is denied")
     img = await uploaded_image(photo)
     faces = get_face_app().get(img)
     if not faces:
@@ -355,8 +630,11 @@ async def add_student(
 @app.post("/delete/{name}")
 async def delete_student(request: Request, name: str):
     require_teacher_action(request)
-    require_admin(request)
+    if not is_admin(request):
+        raise HTTPException(status_code=403, detail="Only administrators can delete students")
     student = get_student_by_name(name)
+    if student is not None and is_teacher(request) and not is_admin(request) and student[1] not in teacher_classes(request):
+        raise HTTPException(status_code=403, detail="Access to another class is denied")
     delete_student_by_name(name)
     photo_path = student[2] if student else os.path.join(FACE_DIR, f"{safe_filename(name)}.jpg")
     if os.path.exists(photo_path):
@@ -370,6 +648,8 @@ async def camera_page(request: Request):
     redirect = require_teacher_page(request)
     if redirect:
         return redirect
+    if is_teacher(request) and not is_admin(request):
+        return RedirectResponse(url="/list", status_code=303)
     return page("Камера", """
 <style>
 
@@ -551,6 +831,8 @@ main{
 @app.get("/camera_feed")
 async def camera_feed(request: Request, status: str = Query("keldi"), camera_index: int = Query(None)):
     require_teacher_action(request)
+    if not is_admin(request):
+        raise HTTPException(status_code=403, detail="Camera is available to administrators only")
     status = "ketti" if status == "ketti" else "keldi"
 
     allowed_index = CAMERA_INDEXES[status]
@@ -558,7 +840,7 @@ async def camera_feed(request: Request, status: str = Query("keldi"), camera_ind
     print(f"STATUS={status} CAMERA={allowed_index}")
 
     return StreamingResponse(
-        camera_frames(status, allowed_index),
+        camera_frames(status, allowed_index, [] if is_admin(request) else teacher_classes(request)),
         media_type="multipart/x-mixed-replace; boundary=frame",
     )
 
@@ -570,7 +852,10 @@ browser_liveness_states = {
 
 
 @app.post("/api/recognize-camera-frame")
-async def recognize_camera_frame(status: str = Form("keldi"), frame: UploadFile = File(...)):
+async def recognize_camera_frame(request: Request, status: str = Form("keldi"), frame: UploadFile = File(...)):
+    require_teacher_action(request)
+    if not is_admin(request):
+        raise HTTPException(status_code=403, detail="Camera is available to administrators only")
     status = "ketti" if status == "ketti" else "keldi"
     data = await frame.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
@@ -579,7 +864,8 @@ async def recognize_camera_frame(status: str = Form("keldi"), frame: UploadFile 
     if image is None:
         return {"people": []}
 
-    people = await asyncio.to_thread(recognize_frame, image, status, browser_liveness_states[status])
+    allowed_classes = [] if is_admin(request) else teacher_classes(request)
+    people = await asyncio.to_thread(recognize_frame, image, status, browser_liveness_states[status], allowed_classes)
     return {
         "people": [
             {
