@@ -49,6 +49,7 @@ $env:PRODUCTION="1"
 $env:APP_PORT="8000"
 $env:APP_AUTO_PORT="0"
 $env:TEACHER_PASSWORD="your-strong-teacher-password"
+$env:ADMIN_PASSWORD="your-strong-admin-password"
 $env:ADMIN_TOKEN="your-long-random-admin-token"
 $env:ALLOWED_ORIGINS="http://127.0.0.1:8000,http://localhost:8000"
 python admin_panel.py

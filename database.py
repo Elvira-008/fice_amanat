@@ -1,10 +1,13 @@
+import hashlib
+import hmac
+import secrets
 import sqlite3
 import threading
 from datetime import datetime
 
 import numpy as np
 
-from settings import DB_NAME
+from settings import DB_NAME, TEACHER_PASSWORD
 
 attendance_lock = threading.Lock()
 
@@ -57,6 +60,13 @@ def init_db():
             role TEXT DEFAULT 'parent'
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS teachers (
+            login TEXT PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            class_names TEXT NOT NULL DEFAULT ''
+        )
+    """)
     # === КӨП-РАКУРСТУК ТААНУУ ҮЧҮН ЖАҢЫ ТАБЛИЦА ===
     # Бир окуучуга бир нече ракурстун (front/left/right/up/down) эмбеддингин сактайт.
     cursor.execute("""
@@ -90,6 +100,77 @@ def init_db():
         ON face_embeddings (name)
     """)
 
+    cursor.execute("SELECT 1 FROM teachers LIMIT 1")
+    if cursor.fetchone() is None:
+        cursor.execute(
+            "INSERT INTO teachers (login, password_hash, class_names) VALUES (?, ?, ?)",
+            ("teacher", hash_password(TEACHER_PASSWORD), ""),
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def hash_password(password):
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 200_000)
+    return f"{salt.hex()}:{digest.hex()}"
+
+
+def verify_password(password, stored_hash):
+    try:
+        salt_hex, digest_hex = stored_hash.split(":", 1)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt_hex), 200_000)
+        return hmac.compare_digest(digest.hex(), digest_hex)
+    except (AttributeError, ValueError):
+        return False
+
+
+def save_teacher(login, password, class_names):
+    login = login.strip()
+    classes = [value.strip() for value in class_names if value.strip()]
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT password_hash, class_names FROM teachers WHERE login = ?", (login,))
+    existing = cur.fetchone()
+    password_hash = hash_password(password) if password else (existing[0] if existing else "")
+    if not login or not password_hash:
+        conn.close()
+        return False
+    existing_classes = [value for value in existing[1].split(",") if value] if existing else []
+    merged_classes = list(dict.fromkeys(existing_classes + classes))
+    cur.execute(
+        "INSERT OR REPLACE INTO teachers (login, password_hash, class_names) VALUES (?, ?, ?)",
+        (login, password_hash, ",".join(merged_classes)),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def authenticate_teacher(login, password):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT password_hash, class_names FROM teachers WHERE login = ?", (login.strip(),))
+    row = cur.fetchone()
+    conn.close()
+    if row is None or not verify_password(password, row[0]):
+        return None
+    return [value for value in row[1].split(",") if value]
+
+
+def get_teachers():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT login, class_names FROM teachers ORDER BY login")
+    rows = [(login, [value for value in classes.split(",") if value]) for login, classes in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def delete_teacher(login):
+    conn = get_connection()
+    conn.execute("DELETE FROM teachers WHERE login = ?", (login.strip(),))
     conn.commit()
     conn.close()
 
@@ -304,11 +385,19 @@ def delete_student_by_name(name):
     conn.close()
 
 
-def clear_attendance():
+def clear_attendance(class_name=None):
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("DELETE FROM attendance")
-    cur.execute("DELETE FROM sqlite_sequence WHERE name = 'attendance'")
+    if isinstance(class_name, (list, tuple, set)):
+        classes = [str(value).strip() for value in class_name if str(value).strip()]
+        placeholders = ",".join("?" for _ in classes)
+        if classes:
+            cur.execute(f"DELETE FROM attendance WHERE class_name IN ({placeholders})", classes)
+    elif class_name:
+        cur.execute("DELETE FROM attendance WHERE class_name = ?", (class_name.strip(),))
+    else:
+        cur.execute("DELETE FROM attendance")
+        cur.execute("DELETE FROM sqlite_sequence WHERE name = 'attendance'")
     conn.commit()
     conn.close()
 
@@ -409,6 +498,61 @@ def get_recent_attendance(limit=50):
     return list(reversed(data))[:limit]
 
 
+def get_class_report(class_name):
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT a.name, a.class_name, a.status, a.timestamp, s.parent_name, s.parent_code
+        FROM attendance a
+        LEFT JOIN students s ON s.name = a.name
+        WHERE a.class_name = ?
+        ORDER BY a.timestamp ASC, a.id ASC
+    """, (class_name.strip(),))
+    rows = cur.fetchall()
+    conn.close()
+    last_status = {}
+    data = [row for row in rows if is_status_change(row, last_status, 0, 2, 3)]
+    return list(reversed(data))
+
+
+def get_class_daily_report(class_name):
+    """Return one attendance summary per student and day for a teacher report."""
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        WITH report_days AS (
+            SELECT s.name, s.class_name, s.parent_name, s.parent_code,
+                   date('now', 'localtime') AS report_date
+            FROM students s
+            WHERE s.class_name = ?
+
+            UNION
+
+            SELECT s.name, s.class_name, s.parent_name, s.parent_code,
+                   date(a.timestamp) AS report_date
+            FROM students s
+            JOIN attendance a ON a.name = s.name
+            WHERE s.class_name = ?
+        )
+        SELECT d.name,
+               d.class_name,
+               d.report_date,
+               MIN(CASE WHEN a.status = 'keldi' THEN time(a.timestamp) END) AS arrived_at,
+               MAX(CASE WHEN a.status = 'ketti' THEN time(a.timestamp) END) AS left_at,
+               d.parent_name,
+               d.parent_code
+        FROM report_days d
+        LEFT JOIN attendance a
+               ON a.name = d.name
+              AND date(a.timestamp) = d.report_date
+        GROUP BY d.name, d.class_name, d.report_date, d.parent_name, d.parent_code
+        ORDER BY d.report_date DESC, d.name
+    """, (class_name.strip(), class_name.strip()))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
 def get_parent_report(parent_code, parent_name=""):
     conn = get_connection()
     cur = conn.cursor()
@@ -434,3 +578,44 @@ def get_parent_report(parent_code, parent_name=""):
         if row[2] is None or is_status_change(row, last_status, 0, 2, 3)
     ]
     return sorted(data, key=lambda row: (row[0], row[3] or ""), reverse=True)
+
+
+def get_classes_summary():
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT s.class_name,
+               COUNT(*) AS students_count,
+               COUNT(DISTINCT CASE WHEN a.status = 'keldi' AND date(a.timestamp) = date('now', 'localtime') THEN s.name END),
+               COUNT(DISTINCT CASE WHEN a.status = 'ketti' AND date(a.timestamp) = date('now', 'localtime') THEN s.name END)
+        FROM students s
+        LEFT JOIN attendance a ON a.name = s.name
+        GROUP BY s.class_name
+        ORDER BY s.class_name
+    """)
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_parents_summary(class_names=None):
+    conn = get_connection()
+    cur = conn.cursor()
+    classes = [str(value).strip() for value in (class_names or []) if str(value).strip()]
+    where = ""
+    params = []
+    if classes:
+        where = f"WHERE s.class_name IN ({','.join('?' for _ in classes)})"
+        params = classes
+    cur.execute(f"""
+        SELECT s.parent_name, s.parent_code,
+               COUNT(*) AS children_count,
+               GROUP_CONCAT(s.name || ' (' || s.class_name || ')', ', ')
+        FROM students s
+        {where}
+        GROUP BY s.parent_name, s.parent_code
+        ORDER BY s.parent_name, s.parent_code
+    """, params)
+    rows = cur.fetchall()
+    conn.close()
+    return rows

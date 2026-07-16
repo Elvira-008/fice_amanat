@@ -44,9 +44,25 @@ a { color: var(--blue); text-decoration: none; }
 .btn:hover { transform: translateY(-1px); filter: brightness(1.03); }
 .btn.green { background: var(--green); }
 .btn.red { background: var(--red); }
+.btn.purple { background: #6d28d9; }
 .btn.light { background: white; color: #111827; border: 1px solid var(--line); }
 
 .panel { background: white; border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-bottom: 18px; }
+.login-shell { min-height: 100vh; display: grid; place-content: center; padding: 24px; box-sizing: border-box; background: linear-gradient(145deg, #f8fbff, #edf3ff); }
+.login-hero { width: min(460px, calc(100vw - 48px)); padding: 0 0 24px 96px; box-sizing: border-box; }
+.login-hero .shield { left: 0; top: 0; }
+.login-hero h1 { font-size: 42px; }
+.login-hero p { font-size: 17px; margin-bottom: 16px; }
+.unified-login-panel { width: min(460px, calc(100vw - 48px)); box-sizing: border-box; padding: 26px; border-radius: 16px; box-shadow: 0 20px 50px rgba(37, 99, 235, .12); }
+.unified-login-panel .btn { width: 100%; }
+.students-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+.students-heading h1 { margin: 0; }
+.add-student-corner { margin-left: auto; }
+.student-dialog { width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 40px); box-sizing: border-box; border: 0; border-radius: 16px; padding: 22px; box-shadow: 0 24px 70px rgba(15, 23, 42, .28); }
+.student-dialog::backdrop { background: rgba(15, 23, 42, .56); }
+.student-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.student-dialog-head h2 { margin: 0; }
+.dialog-close { border: 0; background: #eef2f7; color: #334155; width: 36px; height: 36px; border-radius: 50%; cursor: pointer; font-size: 26px; line-height: 1; }
 input, select { width: 100%; box-sizing: border-box; padding: 10px; margin: 7px 0 12px; border: 1px solid #cbd5e1; border-radius: 7px; font-size: 15px; }
 label { font-weight: 700; font-size: 14px; }
 table { width: 100%; border-collapse: collapse; background: white; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
@@ -63,6 +79,18 @@ img.camera { width: 100%; height: auto; background: #111827; border-radius: 8px;
 .home-shell:before { content: ""; position: absolute; inset: -80px -120px auto auto; width: 520px; height: 250px; border: 2px solid rgba(80,112,255,.14); border-radius: 0 0 0 80%; transform: rotate(9deg); }
 .home-shell:after { content: ""; position: absolute; left: -160px; right: -160px; bottom: -210px; height: 340px; background: linear-gradient(135deg, rgba(59,130,246,.08), rgba(124,58,237,.17)); border-radius: 50% 50% 0 0; z-index: -1; }
 .home-top { position: absolute; top: 30px; right: 28px; display: flex; gap: 24px; align-items: center; }
+.class-switch {
+    position: fixed;
+    top: 18px;
+    right: 18px;
+    z-index: 1000;
+    padding: 9px 13px;
+    font-size: 14px;
+    box-shadow: 0 8px 18px rgba(15,23,42,.10);
+    pointer-events: auto;
+}
+.add-class-btn { display: block; margin: 0 0 14px; }
+#teacherClasses input { margin-bottom: 8px; }
 .notify { position: relative; font-size: 28px; color: #0f2c6b; }
 .notify:after { content: "1"; position: absolute; top: -8px; right: -8px; width: 19px; height: 19px; border-radius: 50%; background: #ef4444; color: white; font-size: 12px; display: grid; place-items: center; border: 2px solid white; }
 .avatar { width: 52px; height: 52px; border-radius: 50%; background: linear-gradient(135deg, #1d4ed8, #0ea5e9); color: white; display: grid; place-items: center; font-size: 28px; box-shadow: 0 12px 25px rgba(37,99,235,.24); position: relative; }
@@ -360,4 +388,21 @@ body.camera-mode main{
 .camera-controls .btn{
 
     height:44px;
+}
+.status-arrived,
+.status-absent {
+    display: inline-block;
+    padding: 5px 10px;
+    border-radius: 999px;
+    font-weight: 700;
+}
+
+.status-arrived {
+    color: #166534;
+    background: #dcfce7;
+}
+
+.status-absent {
+    color: #991b1b;
+    background: #fee2e2;
 }
